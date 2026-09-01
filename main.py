@@ -8,14 +8,25 @@ import time
 import uuid
 import os
 
+# NEW: RAG dependencies
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+
+# NEW: optional free LLM provider (Groq)
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
+
 #----------------------
 # APP Initialization
 #----------------------
 
 app = FastAPI(
     title="Enterprise AI Resume Generator Agent",
-    description="An API for generating professional resumes using AI",
-    version="1.0.0",
+    description="An API for generating professional resumes using AI, with RAG-based job-description matching",
+    version="2.0.0",
 )
 
 #----------------------
@@ -25,6 +36,33 @@ app = FastAPI(
 valid_api_keys = {os.getenv("API_KEY_HERE")}
 api_key_value = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key_value) if api_key_value else None
+
+# NEW: LLM provider selection — defaults to Groq (free) if configured, falls back to OpenAI
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
+groq_api_key = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=groq_api_key) if (Groq and groq_api_key) else None
+
+#----------------------
+# RAG CONFIG (NEW)
+#----------------------
+
+# Free, local embedding model — no API cost, runs on CPU
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 output size
+
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+COLLECTION_NAME = "resume_chunks"
+
+qdrant_client = None
+if QDRANT_URL:
+    qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    existing_collections = [c.name for c in qdrant_client.get_collections().collections]
+    if COLLECTION_NAME not in existing_collections:
+        qdrant_client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+        )
 
 #----------------------
 # REQUEST MODEL
@@ -39,6 +77,7 @@ class ResumeRequest(BaseModel):
 
     resume_text: str | None = Field(None, max_length=90000)
     resume_file: str | None = None   # File path or uploaded file name
+    job_description: str | None = Field(None, max_length=20000)  # NEW: enables RAG matching
 
     @model_validator(mode="after")
     def validate_resume(self):
@@ -84,6 +123,17 @@ def verify_api_key(api_key):
 #----------------------
 
 def call_llm(prompt):
+    # NEW: Groq path (free) — used when LLM_PROVIDER=groq and a key is configured
+    if LLM_PROVIDER == "groq" and groq_client is not None:
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content
+        except Exception as exc:
+            log_event(f"Groq call failed, falling back to OpenAI: {exc}")
+
     if client is None:
         return f"Simulated response for: {prompt}"
 
@@ -101,6 +151,83 @@ def call_llm(prompt):
     except Exception as exc:
         print(f"OpenAI call failed: {exc}")
         return f"Simulated response for: {prompt}"
+
+#--------------------------------
+# RAG HELPERS (NEW)
+#--------------------------------
+
+def chunk_resume(resume_text: str) -> list[str]:
+    """Split resume text into chunks (by line/bullet) for embedding."""
+    if not resume_text:
+        return []
+    raw_lines = [line.strip() for line in resume_text.split("\n")]
+    chunks = [line for line in raw_lines if len(line) > 15]  # drop empty/trivial lines
+    return chunks
+
+
+def embed_text(text: str) -> list[float]:
+    return embedding_model.encode(text).tolist()
+
+
+def store_resume_chunks(request_id: str, chunks: list[str]):
+    """Embed and upsert resume chunks into Qdrant, tagged with request_id."""
+    if qdrant_client is None or not chunks:
+        log_event("Qdrant not configured or no chunks to store — skipping vector storage")
+        return
+
+    points = []
+    for i, chunk in enumerate(chunks):
+        vector = embed_text(chunk)
+        points.append(
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector=vector,
+                payload={"request_id": request_id, "text": chunk},
+            )
+        )
+
+    qdrant_client.upsert(collection_name=COLLECTION_NAME, points=points)
+    log_event(f"{request_id}: stored {len(points)} resume chunks in Qdrant")
+
+
+def retrieve_relevant_chunks(request_id: str, job_description: str, top_k: int = 5) -> list[str]:
+    """Semantic search: find resume chunks most relevant to the job description."""
+    if qdrant_client is None or not job_description:
+        return []
+
+    query_vector = embed_text(job_description)
+
+    results = qdrant_client.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=query_vector,
+        query_filter={"must": [{"key": "request_id", "match": {"value": request_id}}]},
+        limit=top_k,
+    )
+
+    matched_chunks = [hit.payload["text"] for hit in results]
+    log_event(f"{request_id}: retrieved {len(matched_chunks)} relevant chunks via vector search")
+    return matched_chunks
+
+
+def semantic_ats_score(job_description: str, matched_chunks: list[str]) -> int:
+    """
+    Real similarity-based ATS score (0-100), replacing pure keyword matching.
+    Uses cosine similarity between the JD embedding and each matched chunk.
+    """
+    if not job_description or not matched_chunks:
+        return 0
+
+    jd_vector = embedding_model.encode(job_description)
+    chunk_vectors = embedding_model.encode(matched_chunks)
+
+    import numpy as np
+    similarities = [
+        float(np.dot(jd_vector, cv) / (np.linalg.norm(jd_vector) * np.linalg.norm(cv)))
+        for cv in chunk_vectors
+    ]
+    avg_similarity = sum(similarities) / len(similarities)
+    score = round(avg_similarity * 100)
+    return max(0, min(score, 100))
 
 #----------------------
 # PROFILE ANALYZER AGENT
@@ -149,18 +276,24 @@ def calculate_ats_score(resume_text: str, skills: list[str]) -> int:
     return max(0, min(score, 100))
 
 #------------------------
-# ATS OPTIMIZATION AGENT
+# ATS OPTIMIZATION AGENT (UPDATED — now RAG-aware)
 #------------------------
 
-def ats_agent(user_request):
+def ats_agent(user_request, matched_chunks=None, semantic_score=None):
 
     log_event("ATS Agent Started")
 
-    prompt = f"""
-    Analyze this resume for ATS.
+    # Fall back to keyword scoring if no JD/vector match was available
+    keyword_score = calculate_ats_score(user_request.get("resume_text", ""), user_request["skills"])
+    final_score = semantic_score if semantic_score is not None else keyword_score
 
-    Resume:
-    {user_request.get('resume_text','')}
+    relevant_context = "\n".join(matched_chunks) if matched_chunks else user_request.get("resume_text", "")
+
+    prompt = f"""
+    Analyze this resume content for ATS optimization against the job description context below.
+
+    Most relevant resume content (retrieved via semantic search):
+    {relevant_context}
 
     Skills:
     {', '.join(user_request['skills'])}
@@ -169,23 +302,25 @@ def ats_agent(user_request):
 
     {{
       "missing_keywords": [],
-      "ats_score": 0
+      "ats_score": {final_score}
     }}
     """
 
     output = call_llm(prompt)
 
-    log_event(f"ATS Output: {output}")
+    log_event(f"ATS Output: {output} | keyword_score={keyword_score} semantic_score={semantic_score}")
 
-    return output
+    return {"llm_feedback": output, "ats_score": final_score}
 
 #----------------------
-# RESUME WRITER AGENT
+# RESUME WRITER AGENT (UPDATED — uses RAG-matched content when available)
 #----------------------
 
-def resume_writer_agent(user_request):
+def resume_writer_agent(user_request, matched_chunks=None):
 
     log_event("Resume Writer Agent Started")
+
+    resume_content = "\n".join(matched_chunks) if matched_chunks else user_request.get("resume_text", "")
 
     prompt = f"""
     Generate a professional ATS-friendly resume.
@@ -202,8 +337,8 @@ def resume_writer_agent(user_request):
     Experience:
     {user_request['experience_years']} years
 
-    Resume Content:
-    {user_request.get('resume_text','')}
+    Most relevant resume content for this job (retrieved via semantic search):
+    {resume_content}
     """
 
     resume = call_llm(prompt)
@@ -287,15 +422,30 @@ def reviewer_agent(user_request):
     return output
 
 #----------------------
-# ORCHESTRATOR
+# ORCHESTRATOR (UPDATED — adds RAG step before agent workflow)
 #----------------------
 
 def orchestrator(user_request, request_id):
     log_event(f"Orchestrator received request: {user_request}")
     start = time.time()
+
+    # NEW: RAG step — chunk + store resume, then retrieve JD-relevant chunks
+    matched_chunks = []
+    semantic_score = None
+    resume_text = user_request.get("resume_text")
+    job_description = user_request.get("job_description")
+
+    if resume_text:
+        chunks = chunk_resume(resume_text)
+        store_resume_chunks(request_id, chunks)
+
+        if job_description:
+            matched_chunks = retrieve_relevant_chunks(request_id, job_description)
+            semantic_score = semantic_ats_score(job_description, matched_chunks)
+
     analyzer_output = analyzer_agent(user_request, request_id)
-    ats_output = ats_agent(user_request)
-    resume_writer_output = resume_writer_agent(user_request)
+    ats_output = ats_agent(user_request, matched_chunks=matched_chunks, semantic_score=semantic_score)
+    resume_writer_output = resume_writer_agent(user_request, matched_chunks=matched_chunks)
     reviewer_output = reviewer_agent(user_request)
     human_optimizer_output = human_optimizer_agent(user_request, resume_writer_output["generated_resume"])
 
@@ -314,6 +464,7 @@ def orchestrator(user_request, request_id):
         "status": "success",
         "request_id": request_id,
         "execution_time": execution_time,
+        "rag_matches_used": len(matched_chunks),
         "workflow": {
             "analyzer": analyzer_output,
             "ats_optimization": ats_output,
