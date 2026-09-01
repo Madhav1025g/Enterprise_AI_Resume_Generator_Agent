@@ -7,3 +7,6 @@ sentence-transformers
 qdrant-client
 groq
 numpy
+streamlit
+pypdf
+python-docx
