@@ -128,7 +128,7 @@ def call_llm(prompt):
     if LLM_PROVIDER == "groq" and groq_client is not None:
         try:
             response = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="openai/gpt-oss-20b",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.choices[0].message.content
