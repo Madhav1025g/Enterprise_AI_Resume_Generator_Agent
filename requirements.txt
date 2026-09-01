@@ -3,10 +3,7 @@ uvicorn
 pydantic
 python-dotenv
 openai
-sentence-transformers
-qdrant-client
 groq
-numpy
 streamlit
 pypdf
 python-docx
