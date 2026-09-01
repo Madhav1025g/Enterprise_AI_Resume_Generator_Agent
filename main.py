@@ -8,11 +8,6 @@ import time
 import uuid
 import os
 
-# NEW: RAG dependencies
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-
 # NEW: optional free LLM provider (Groq)
 try:
     from groq import Groq
@@ -46,16 +41,22 @@ groq_client = Groq(api_key=groq_api_key) if (Groq and groq_api_key) else None
 # RAG CONFIG (NEW)
 #----------------------
 
-# Free, local embedding model — no API cost, runs on CPU
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 output size
-
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 COLLECTION_NAME = "resume_chunks"
+EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 output size
 
+embedding_model = None
 qdrant_client = None
+
+# Only load the heavy embedding/vector libraries if Qdrant is actually configured.
+# This keeps the app lightweight (and working) until you set up the RAG phase.
 if QDRANT_URL:
+    from sentence_transformers import SentenceTransformer
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams, PointStruct
+
+    embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
     existing_collections = [c.name for c in qdrant_client.get_collections().collections]
     if COLLECTION_NAME not in existing_collections:
@@ -166,6 +167,8 @@ def chunk_resume(resume_text: str) -> list[str]:
 
 
 def embed_text(text: str) -> list[float]:
+    if embedding_model is None:
+        return []
     return embedding_model.encode(text).tolist()
 
 
@@ -214,7 +217,7 @@ def semantic_ats_score(job_description: str, matched_chunks: list[str]) -> int:
     Real similarity-based ATS score (0-100), replacing pure keyword matching.
     Uses cosine similarity between the JD embedding and each matched chunk.
     """
-    if not job_description or not matched_chunks:
+    if not job_description or not matched_chunks or embedding_model is None:
         return 0
 
     jd_vector = embedding_model.encode(job_description)
