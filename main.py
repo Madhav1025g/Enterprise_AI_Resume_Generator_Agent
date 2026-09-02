@@ -276,8 +276,10 @@ def retrieve_relevant_chunks(request_id: str, job_description: str, top_k: int =
 
 def semantic_ats_score(job_description: str, matched_chunks: list[str]) -> int:
     """
-    Real similarity-based ATS score (0-100), replacing pure keyword matching.
-    Uses cosine similarity between the JD embedding and each matched chunk.
+    Similarity-based ATS score (0-100) using cosine similarity between the JD embedding
+    and each matched chunk. Raw cosine similarity between a job description (long, formal)
+    and a resume bullet (short, specific) rarely exceeds ~0.6 even for a strong match, so
+    the raw value is rescaled here to map onto a more intuitive 0-100 "match quality" range.
     """
     if not job_description or not matched_chunks or embedding_model is None:
         return None
@@ -291,7 +293,11 @@ def semantic_ats_score(job_description: str, matched_chunks: list[str]) -> int:
         for cv in chunk_vectors
     ]
     avg_similarity = sum(similarities) / len(similarities)
-    score = round(avg_similarity * 100)
+
+    # Rescale: treat ~0.15 raw similarity as "0% match" and ~0.65 as "100% match" —
+    # calibrated to this embedding model's typical range for JD-vs-resume-bullet comparisons.
+    rescaled = (avg_similarity - 0.15) / (0.65 - 0.15) * 100
+    score = round(rescaled)
     return max(0, min(score, 100))
 
 #----------------------
@@ -351,9 +357,14 @@ def ats_agent(user_request, matched_chunks=None, semantic_score=None):
 
     log_event("ATS Agent Started")
 
-    # Fall back to keyword scoring if no JD/vector match was available
+    # Blend keyword matching (literal, generous) with semantic similarity (conservative by nature —
+    # raw cosine similarity between differently-styled texts rarely exceeds ~0.5-0.6 even for strong
+    # matches, so using it alone makes even great resumes look artificially low).
     keyword_score = calculate_ats_score(user_request.get("resume_text", ""), user_request["skills"])
-    final_score = semantic_score if semantic_score is not None else keyword_score
+    if semantic_score is not None:
+        final_score = round((keyword_score + semantic_score) / 2)
+    else:
+        final_score = keyword_score
 
     relevant_context = "\n".join(matched_chunks) if matched_chunks else user_request.get("resume_text", "")
 
