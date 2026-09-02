@@ -271,7 +271,10 @@ def calculate_ats_score(resume_text: str, skills: list[str]) -> int:
     score = 50
     lower_text = resume_text.lower()
     for skill in skills:
-        if skill.lower() in lower_text:
+        # Match if every word in the skill appears somewhere in the resume
+        # (handles "REST API" vs "RESTful APIs" style mismatches)
+        skill_words = skill.lower().split()
+        if skill_words and all(word in lower_text for word in skill_words):
             score += 10
         else:
             score -= 5
@@ -293,7 +296,7 @@ def ats_agent(user_request, matched_chunks=None, semantic_score=None):
     relevant_context = "\n".join(matched_chunks) if matched_chunks else user_request.get("resume_text", "")
 
     prompt = f"""
-    Analyze this resume content for ATS optimization against the job description context below.
+    Analyze this resume content against the skills list below and identify any important skills that seem missing or under-represented in the resume text.
 
     Most relevant resume content (retrieved via semantic search):
     {relevant_context}
@@ -304,8 +307,7 @@ def ats_agent(user_request, matched_chunks=None, semantic_score=None):
     Return only JSON:
 
     {{
-      "missing_keywords": [],
-      "ats_score": {final_score}
+      "missing_keywords": []
     }}
     """
 
@@ -425,39 +427,103 @@ def reviewer_agent(user_request):
     return output
 
 #----------------------
-# ORCHESTRATOR (UPDATED — adds RAG step before agent workflow)
+# COVER LETTER AGENT (NEW)
 #----------------------
 
-def orchestrator(user_request, request_id):
+def cover_letter_agent(user_request, matched_chunks=None):
+
+    log_event("Cover Letter Agent Started")
+
+    job_description = user_request.get("job_description") or ""
+    relevant_context = "\n".join(matched_chunks) if matched_chunks else user_request.get("resume_text", "")
+
+    if job_description:
+        jd_instruction = f"Tailor it specifically to this job description:\n{job_description}"
+    else:
+        jd_instruction = "No specific job description was provided — write a strong, general-purpose cover letter highlighting the candidate's background."
+
+    prompt = f"""
+    Write a professional, concise cover letter (3-4 short paragraphs) for the candidate below.
+
+    Candidate Name: {user_request['full_name']}
+    Current Role: {user_request['current_role']}
+    Years of Experience: {user_request['experience_years']}
+    Key Skills: {', '.join(user_request['skills'])}
+
+    Most relevant experience from their resume:
+    {relevant_context}
+
+    {jd_instruction}
+
+    Write in first person, professional but not stiff. If no company name is given, address it "Dear Hiring Manager,". Do not include placeholder brackets like [Company Name] unless a real company name was provided in the job description.
+    """
+
+    letter = call_llm(prompt)
+
+    output = {
+        "cover_letter": letter
+    }
+
+    log_event("Cover letter generated successfully")
+
+    return output
+
+#----------------------
+# ORCHESTRATOR (UPDATED — adds RAG step, cover letter, and progress callback)
+#----------------------
+
+def orchestrator(user_request, request_id, progress_callback=None):
     log_event(f"Orchestrator received request: {user_request}")
     start = time.time()
 
-    # NEW: RAG step — chunk + store resume, then retrieve JD-relevant chunks
+    def notify(message):
+        log_event(f"{request_id}: {message}")
+        if progress_callback:
+            progress_callback(message)
+
+    # RAG step — chunk + store resume, then retrieve JD-relevant chunks
     matched_chunks = []
     semantic_score = None
     resume_text = user_request.get("resume_text")
     job_description = user_request.get("job_description")
 
+    notify("Reading and chunking resume...")
     if resume_text:
         chunks = chunk_resume(resume_text)
         store_resume_chunks(request_id, chunks)
 
         if job_description:
+            notify("Matching resume to job description...")
             matched_chunks = retrieve_relevant_chunks(request_id, job_description)
             semantic_score = semantic_ats_score(job_description, matched_chunks)
 
+    notify("Analyzing candidate profile...")
     analyzer_output = analyzer_agent(user_request, request_id)
+
+    notify("Scoring ATS match...")
     ats_output = ats_agent(user_request, matched_chunks=matched_chunks, semantic_score=semantic_score)
+
+    notify("Writing first draft of resume...")
     resume_writer_output = resume_writer_agent(user_request, matched_chunks=matched_chunks)
+
+    notify("Reviewing for grammar and consistency...")
     reviewer_output = reviewer_agent(user_request)
+
+    notify("Polishing into a human-friendly final version...")
     human_optimizer_output = human_optimizer_agent(user_request, resume_writer_output["generated_resume"])
+
+    notify("Drafting a matching cover letter...")
+    cover_letter_output = cover_letter_agent(user_request, matched_chunks=matched_chunks)
+
+    notify("Finalizing...")
 
     final_output = {
         "analyzer": analyzer_output,
         "ats_optimization": ats_output,
         "resume_writer": resume_writer_output,
         "human_optimizer": human_optimizer_output,
-        "reviewer": reviewer_output
+        "reviewer": reviewer_output,
+        "cover_letter": cover_letter_output,
     }
     end = time.time()
     execution_time = round(end - start, 2)
@@ -473,7 +539,8 @@ def orchestrator(user_request, request_id):
             "ats_optimization": ats_output,
             "resume_writer": resume_writer_output,
             "human_optimizer": human_optimizer_output,
-            "reviewer": reviewer_output
+            "reviewer": reviewer_output,
+            "cover_letter": cover_letter_output,
         },
         "final_report": final_output,
         "logs": logs,
