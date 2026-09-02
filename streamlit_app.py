@@ -487,11 +487,3 @@ if "last_result" in st.session_state:
                             else:
                                 st.warning("Couldn't find an exact match to auto-apply — edit manually.")
 
-# ------------------------------------------------------------------
-# Feedback footer
-# ------------------------------------------------------------------
-st.divider()
-st.markdown(
-    "### Found this useful? \n"
-    "[⭐ Leave a quick review here](PASTE_YOUR_GOOGLE_FORM_LINK_HERE) — it takes 30 seconds and helps a lot!"
-)
