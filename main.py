@@ -537,11 +537,22 @@ def reviewer_agent(resume_text):
     - "current_text": the exact snippet from the resume above with the issue, copied verbatim
     - "suggested_fix": the corrected version of that exact snippet
 
-    Return at most 8 of the most impactful items. If there are no issues, return [].
+    CRITICAL: Only include an item if suggested_fix is genuinely different from current_text and
+    is non-empty. Do NOT include an item just to reach a quota — if current_text and suggested_fix
+    would be identical, or if you have nothing meaningful to suggest, leave that item out entirely.
+
+    Return at most 8 of the most impactful items. If there are no real issues, return [].
     """
 
     raw_output = call_llm(prompt)
     suggestions = parse_json_list(raw_output)
+
+    # Safety net: drop any no-op or empty suggestions even if the model ignored the instruction above
+    suggestions = [
+        s for s in suggestions
+        if s.get("suggested_fix", "").strip()
+        and s.get("suggested_fix", "").strip() != s.get("current_text", "").strip()
+    ]
 
     log_event(f"Reviewer completed with {len(suggestions)} suggestions")
 
