@@ -206,6 +206,7 @@ def build_pdf_bytes(text: str) -> bytes:
     pdf.add_page()
     pdf.set_font("Helvetica", size=10)
     for line in safe_text.split("\n"):
+        pdf.set_x(pdf.l_margin)  # multi_cell leaves x at the right margin otherwise, crashing the next call
         if line.strip() == "":
             pdf.ln(5)
         else:
@@ -486,4 +487,3 @@ if "last_result" in st.session_state:
                                 st.rerun()
                             else:
                                 st.warning("Couldn't find an exact match to auto-apply — edit manually.")
-
