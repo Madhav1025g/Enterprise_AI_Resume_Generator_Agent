@@ -65,6 +65,17 @@ if QDRANT_URL:
             vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
         )
 
+    # Qdrant requires a payload index to filter by a field (e.g. request_id).
+    # Creating it is idempotent-safe here — ignore the error if it already exists.
+    try:
+        qdrant_client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="request_id",
+            field_schema="keyword",
+        )
+    except Exception as exc:
+        print(f"Payload index setup skipped (likely already exists): {exc}")
+
 #----------------------
 # REQUEST MODEL
 #----------------------
