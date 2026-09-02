@@ -130,6 +130,8 @@ def call_llm(prompt):
             response = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=[{"role": "user", "content": prompt}],
+                max_tokens=4096,
+                temperature=0.4,
             )
             return response.choices[0].message.content
         except Exception as exc:
@@ -146,12 +148,59 @@ def call_llm(prompt):
                     "role": "user",
                     "content": prompt
                 }
-            ]
+            ],
+            max_tokens=4096,
+            temperature=0.4,
         )
         return response.choices[0].message.content
     except Exception as exc:
         print(f"OpenAI call failed: {exc}")
         return f"Simulated response for: {prompt}"
+
+import re
+
+#--------------------------------
+# GUARDRAIL: COMPLETENESS CHECK (NEW)
+#--------------------------------
+
+def extract_entry_markers(text: str) -> list[str]:
+    """
+    Heuristic: resume entries (jobs, projects) almost always have a date on the
+    same line as the title/company. Extract those lines as a proxy for 'distinct entries'.
+    """
+    if not text:
+        return []
+    markers = []
+    for line in text.split("\n"):
+        if re.search(r"(19|20)\d{2}", line) and len(line.strip()) > 0:
+            markers.append(line.strip())
+    return markers
+
+
+def check_completeness(original_text: str, final_text: str) -> dict:
+    """
+    Guardrail: compares year-marked lines (likely job/project headers) between the
+    original resume and the AI-generated final version, to catch silently dropped entries.
+    This is a heuristic safety net, not a guarantee — always encourage manual review.
+    """
+    original_markers = extract_entry_markers(original_text)
+    final_text = final_text or ""
+
+    missing = []
+    for marker in original_markers:
+        years_in_marker = re.findall(r"(19|20)\d{2}", marker)
+        found = any(year in final_text for year in years_in_marker)
+        if not found:
+            missing.append(marker)
+
+    total = len(original_markers)
+    completeness_pct = 100 if total == 0 else round(100 * (total - len(missing)) / total)
+
+    return {
+        "completeness_pct": completeness_pct,
+        "total_entries_detected": total,
+        "possibly_missing": missing,
+    }
 
 #--------------------------------
 # RAG HELPERS (NEW)
@@ -353,6 +402,9 @@ def resume_writer_agent(user_request, matched_chunks=None):
       Cloud & DevOps: AWS, Docker, Terraform
     - Use plain bullet points (-) for experience and skills, never a grid or table.
     - Use clear section headers in plain text (e.g. "PROFESSIONAL SUMMARY", "EXPERIENCE", "TECHNICAL SKILLS").
+    - CRITICAL: Include every distinct job, company, and project mentioned in the source content above.
+      Do not merge, summarize away, or silently drop any entry — even if there are many. If the source
+      mentions 3 projects or 4 jobs, the output must contain all 3 or all 4 as separate entries.
     """
 
     resume = call_llm(prompt)
@@ -389,6 +441,9 @@ def human_optimizer_agent(user_request, resume_text):
     - Do NOT use tables or multi-column layouts anywhere (no pipe characters).
     - Keep the Technical Skills section as grouped bullet points, one category per line.
     - Use plain bullet points (-) throughout, never a grid or table.
+    - CRITICAL: Preserve every distinct job, company, and project entry from the resume below.
+      Do not drop, merge, or summarize away any entry while rewriting — the output must contain
+      the exact same number of jobs/projects as the input, just better-written.
 
     Resume:
 
@@ -405,40 +460,57 @@ def human_optimizer_agent(user_request, resume_text):
 
     return output
 
+import json
+
+def parse_json_list(text):
+    """Safely parse a JSON array from LLM output, stripping markdown fences if present."""
+    if not text:
+        return []
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
 #----------------------
-# REVIEWER AGENT
+# REVIEWER AGENT (UPDATED — reviews the FINAL resume, returns structured suggestions)
 #----------------------
 
-def reviewer_agent(user_request):
+def reviewer_agent(resume_text):
 
     log_event("Reviewer Agent Started")
 
     prompt = f"""
-    Review this resume.
+    Review this resume for grammar, formatting, professionalism, and consistency.
 
     Resume:
 
-    {user_request.get('resume_text','')}
+    {resume_text}
 
-    Check:
+    Return ONLY a JSON array (no prose, no markdown code fences) where each item has:
+    - "issue": a short category label (e.g. "Grammar", "Formatting", "Consistency")
+    - "current_text": the exact snippet from the resume above with the issue, copied verbatim
+    - "suggested_fix": the corrected version of that exact snippet
 
-    - Grammar
-    - Formatting
-    - Professionalism
-    - Consistency
-
-    Return concise feedback.
+    Return at most 8 of the most impactful items. If there are no issues, return [].
     """
 
-    feedback = call_llm(prompt)
+    raw_output = call_llm(prompt)
+    suggestions = parse_json_list(raw_output)
 
-    output = {
-        "review_feedback": feedback
+    log_event(f"Reviewer completed with {len(suggestions)} suggestions")
+
+    return {
+        "review_feedback": raw_output,
+        "suggestions": suggestions,
     }
-
-    log_event("Reviewer completed")
-
-    return output
 
 #----------------------
 # COVER LETTER AGENT (NEW)
@@ -520,11 +592,17 @@ def orchestrator(user_request, request_id, progress_callback=None):
     notify("Writing first draft of resume...")
     resume_writer_output = resume_writer_agent(user_request, matched_chunks=matched_chunks)
 
-    notify("Reviewing for grammar and consistency...")
-    reviewer_output = reviewer_agent(user_request)
-
     notify("Polishing into a human-friendly final version...")
     human_optimizer_output = human_optimizer_agent(user_request, resume_writer_output["generated_resume"])
+
+    notify("Running content completeness check...")
+    final_resume_text = human_optimizer_output["human_friendly_resume"]
+    completeness_output = check_completeness(resume_text, final_resume_text)
+    if completeness_output["possibly_missing"]:
+        log_event(f"{request_id}: WARNING — possibly dropped entries: {completeness_output['possibly_missing']}")
+
+    notify("Reviewing final resume for grammar and consistency...")
+    reviewer_output = reviewer_agent(final_resume_text)
 
     notify("Drafting a matching cover letter...")
     cover_letter_output = cover_letter_agent(user_request, matched_chunks=matched_chunks)
@@ -538,6 +616,7 @@ def orchestrator(user_request, request_id, progress_callback=None):
         "human_optimizer": human_optimizer_output,
         "reviewer": reviewer_output,
         "cover_letter": cover_letter_output,
+        "completeness_check": completeness_output,
     }
     end = time.time()
     execution_time = round(end - start, 2)
@@ -555,6 +634,7 @@ def orchestrator(user_request, request_id, progress_callback=None):
             "human_optimizer": human_optimizer_output,
             "reviewer": reviewer_output,
             "cover_letter": cover_letter_output,
+            "completeness_check": completeness_output,
         },
         "final_report": final_output,
         "logs": logs,
