@@ -54,7 +54,7 @@ qdrant_client = None
 if QDRANT_URL:
     from sentence_transformers import SentenceTransformer
     from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, VectorParams, PointStruct
+    from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
@@ -249,14 +249,16 @@ def retrieve_relevant_chunks(request_id: str, job_description: str, top_k: int =
 
     query_vector = embed_text(job_description)
 
-    results = qdrant_client.search(
+    results = qdrant_client.query_points(
         collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
-        query_filter={"must": [{"key": "request_id", "match": {"value": request_id}}]},
+        query=query_vector,
+        query_filter=Filter(
+            must=[FieldCondition(key="request_id", match=MatchValue(value=request_id))]
+        ),
         limit=top_k,
     )
 
-    matched_chunks = [hit.payload["text"] for hit in results]
+    matched_chunks = [point.payload["text"] for point in results.points]
     log_event(f"{request_id}: retrieved {len(matched_chunks)} relevant chunks via vector search")
     return matched_chunks
 
