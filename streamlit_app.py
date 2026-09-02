@@ -326,4 +326,3 @@ if generate_clicked:
 
         with tab5:
             st.write(result["workflow"]["reviewer"]["review_feedback"])
-)
