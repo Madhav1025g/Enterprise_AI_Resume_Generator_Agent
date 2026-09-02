@@ -344,6 +344,15 @@ def resume_writer_agent(user_request, matched_chunks=None):
 
     Most relevant resume content for this job (retrieved via semantic search):
     {resume_content}
+
+    Formatting rules (follow exactly):
+    - Do NOT use tables (no pipe characters, no multi-column layouts) anywhere in the resume.
+    - Format the Technical Skills section as simple grouped bullet points, one category per line, e.g.:
+      Languages: Python, JavaScript
+      Frameworks: FastAPI, React
+      Cloud & DevOps: AWS, Docker, Terraform
+    - Use plain bullet points (-) for experience and skills, never a grid or table.
+    - Use clear section headers in plain text (e.g. "PROFESSIONAL SUMMARY", "EXPERIENCE", "TECHNICAL SKILLS").
     """
 
     resume = call_llm(prompt)
@@ -375,6 +384,11 @@ def human_optimizer_agent(user_request, resume_text):
     - Remove AI generated patterns
     - Professional
     - ATS Friendly
+
+    Formatting rules (follow exactly):
+    - Do NOT use tables or multi-column layouts anywhere (no pipe characters).
+    - Keep the Technical Skills section as grouped bullet points, one category per line.
+    - Use plain bullet points (-) throughout, never a grid or table.
 
     Resume:
 
