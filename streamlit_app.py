@@ -188,11 +188,28 @@ def build_pdf_bytes(text: str) -> bytes:
         safe_text = safe_text.replace(old, new)
     safe_text = safe_text.encode("latin-1", errors="replace").decode("latin-1")
 
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=11)
+    # fpdf2's word-wrap can't break a single unbroken "word" longer than the page
+    # width (e.g. a long URL or run-on token) — pre-break anything too long.
+    def break_long_word(word, max_len=50):
+        if len(word) <= max_len:
+            return word
+        return " ".join(word[i:i + max_len] for i in range(0, len(word), max_len))
+
+    wrapped_lines = []
     for line in safe_text.split("\n"):
-        pdf.multi_cell(0, 6, line)
+        words = line.split(" ")
+        wrapped_lines.append(" ".join(break_long_word(w) for w in words))
+    safe_text = "\n".join(wrapped_lines)
+
+    pdf = FPDF()
+    pdf.set_margins(15, 15, 15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=10)
+    for line in safe_text.split("\n"):
+        if line.strip() == "":
+            pdf.ln(5)
+        else:
+            pdf.multi_cell(0, 6, line)
     return bytes(pdf.output())
 
 
