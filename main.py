@@ -218,7 +218,7 @@ def semantic_ats_score(job_description: str, matched_chunks: list[str]) -> int:
     Uses cosine similarity between the JD embedding and each matched chunk.
     """
     if not job_description or not matched_chunks or embedding_model is None:
-        return 0
+        return None
 
     jd_vector = embedding_model.encode(job_description)
     chunk_vectors = embedding_model.encode(matched_chunks)
