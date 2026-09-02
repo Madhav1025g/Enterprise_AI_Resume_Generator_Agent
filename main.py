@@ -367,28 +367,47 @@ def ats_agent(user_request, matched_chunks=None, semantic_score=None):
         final_score = keyword_score
 
     relevant_context = "\n".join(matched_chunks) if matched_chunks else user_request.get("resume_text", "")
+    job_description = user_request.get("job_description")
+
+    jd_section = (
+        f"Job description to compare against:\n{job_description}"
+        if job_description
+        else "No job description was provided — just flag any obviously missing common skills relative to the candidate's stated skills list."
+    )
 
     prompt = f"""
-    Analyze this resume content against the skills list below and identify any important skills that seem missing or under-represented in the resume text.
+    Compare this resume content against the job description below (if provided) to identify
+    specific tools, technologies, or experience the job asks for that are missing or barely
+    represented in the resume.
 
-    Most relevant resume content (retrieved via semantic search):
+    Resume content (most relevant excerpts):
     {relevant_context}
 
-    Skills:
+    Candidate's stated skills:
     {', '.join(user_request['skills'])}
 
-    Return only JSON:
+    {jd_section}
 
+    Return ONLY JSON (no prose, no markdown fences):
     {{
-      "missing_keywords": []
+      "missing_keywords": [],
+      "explanation": "one or two plain-English sentences explaining the main gaps holding the score back — name the specific missing tools/skills/experience. If nothing significant is missing, say the resume covers the job well."
     }}
     """
 
     output = call_llm(prompt)
+    parsed = parse_json_object(output)
+    missing_keywords = parsed.get("missing_keywords", []) if isinstance(parsed.get("missing_keywords"), list) else []
+    explanation = parsed.get("explanation", "")
 
     log_event(f"ATS Output: {output} | keyword_score={keyword_score} semantic_score={semantic_score}")
 
-    return {"llm_feedback": output, "ats_score": final_score}
+    return {
+        "llm_feedback": output,
+        "ats_score": final_score,
+        "missing_keywords": missing_keywords,
+        "explanation": explanation,
+    }
 
 #----------------------
 # RESUME WRITER AGENT (UPDATED — uses RAG-matched content when available)
@@ -516,6 +535,24 @@ def parse_json_list(text):
     except Exception:
         pass
     return []
+
+
+def parse_json_object(text):
+    """Safely parse a JSON object from LLM output, stripping markdown fences if present."""
+    if not text:
+        return {}
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
 
 #----------------------
 # REVIEWER AGENT (UPDATED — reviews the FINAL resume, returns structured suggestions)
