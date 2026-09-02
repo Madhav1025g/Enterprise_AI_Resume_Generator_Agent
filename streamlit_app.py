@@ -451,7 +451,19 @@ if "last_result" in st.session_state:
         score = ats_data.get("ats_score", 0)
         st.metric("ATS Match Score", f"{score}/100")
         st.progress(score / 100)
-        with st.expander("Detailed feedback"):
+
+        explanation = ats_data.get("explanation", "")
+        missing_keywords = ats_data.get("missing_keywords", [])
+
+        if explanation:
+            st.info(f"**Why this score?** {explanation}")
+
+        if missing_keywords:
+            st.write("**Missing or under-represented from the job description:**")
+            for kw in missing_keywords:
+                st.markdown(f"- {kw}")
+
+        with st.expander("Raw agent output"):
             st.write(ats_data.get("llm_feedback", ""))
 
     with tab5:
@@ -487,3 +499,12 @@ if "last_result" in st.session_state:
                                 st.rerun()
                             else:
                                 st.warning("Couldn't find an exact match to auto-apply — edit manually.")
+
+# ------------------------------------------------------------------
+# Feedback footer
+# ------------------------------------------------------------------
+st.divider()
+st.markdown(
+    "### Found this useful? \n"
+    "[⭐ Leave a quick review here](PASTE_YOUR_GOOGLE_FORM_LINK_HERE) — it takes 30 seconds and helps a lot!"
+)
