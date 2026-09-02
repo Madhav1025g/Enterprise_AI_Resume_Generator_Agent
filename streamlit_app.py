@@ -69,6 +69,29 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+st.markdown("""
+<style>
+.coffee-loader {
+    text-align: center;
+    padding: 1rem 0 0.5rem 0;
+}
+.coffee-loader .cup {
+    font-size: 3rem;
+    display: inline-block;
+    animation: coffee-bounce 1.4s ease-in-out infinite;
+}
+.coffee-loader p {
+    color: #6B7280;
+    font-weight: 600;
+    margin-top: 0.3rem;
+}
+@keyframes coffee-bounce {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    50% { transform: translateY(-12px) rotate(-6deg); }
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.markdown(
     '<div class="badge-row">'
     '<span class="badge">⚡ Groq LLM</span>'
@@ -152,6 +175,27 @@ def build_docx_bytes(text: str) -> bytes:
     return buffer.getvalue()
 
 
+def build_pdf_bytes(text: str) -> bytes:
+    from fpdf import FPDF
+
+    # Core PDF fonts only support latin-1 — sanitize common unicode punctuation
+    replacements = {
+        "\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+        "\u201c": '"', "\u201d": '"', "\u2022": "-", "\u2026": "...",
+    }
+    safe_text = text
+    for old, new in replacements.items():
+        safe_text = safe_text.replace(old, new)
+    safe_text = safe_text.encode("latin-1", errors="replace").decode("latin-1")
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=11)
+    for line in safe_text.split("\n"):
+        pdf.multi_cell(0, 6, line)
+    return bytes(pdf.output())
+
+
 SAMPLE_RESUME = """Jordan Lee
 Software Engineer
 jordan.lee@email.com | (555) 123-4567 | Boston, MA
@@ -233,7 +277,21 @@ with st.container(border=True):
     job_description = st.text_area("Paste the job description here", height=150, key="job_description_area")
 
 st.write("")
-generate_clicked = st.button("✨ Generate Resume + Cover Letter", use_container_width=True)
+
+MAX_GENERATIONS_PER_SESSION = 3
+if "generation_count" not in st.session_state:
+    st.session_state.generation_count = 0
+
+remaining = MAX_GENERATIONS_PER_SESSION - st.session_state.generation_count
+if remaining <= 0:
+    st.warning(
+        f"You've reached the limit of {MAX_GENERATIONS_PER_SESSION} generations for this session "
+        "(this keeps the free demo available for everyone). Refresh the page to reset, or try again later."
+    )
+    generate_clicked = False
+else:
+    st.caption(f"{remaining} generation(s) remaining this session")
+    generate_clicked = st.button("✨ Generate Resume + Cover Letter", use_container_width=True)
 
 st.markdown('<p class="privacy-note">🔒 Your resume text isn\'t stored anywhere — it only exists for the duration of this session.</p>', unsafe_allow_html=True)
 
@@ -244,6 +302,14 @@ if generate_clicked:
     if not full_name or not resume_text:
         st.error("Please provide at least your name and a resume (uploaded or pasted).")
     else:
+        coffee_placeholder = st.empty()
+        coffee_placeholder.markdown("""
+        <div class="coffee-loader">
+            <div class="cup">☕</div>
+            <p>Brewing your resume... grab a coffee, this takes about 20-30 seconds</p>
+        </div>
+        """, unsafe_allow_html=True)
+
         with st.status("Starting AI agents...", expanded=True) as status:
             def update(msg):
                 status.update(label=msg)
@@ -263,66 +329,152 @@ if generate_clicked:
             result = orchestrator(user_request, request_id, progress_callback=update)
             status.update(label="All agents finished!", state="complete")
 
+        coffee_placeholder.empty()
+
         st.success(f"Done! (took {result['execution_time']}s)")
         increment_counter()
+        st.session_state.generation_count += 1
 
-        final_resume = result["workflow"]["human_optimizer"]["human_friendly_resume"]
-        cover_letter = result["workflow"]["cover_letter"]["cover_letter"]
+        # Store the final resume in session state so Apply-fix buttons can edit it
+        # and have the edits persist across reruns.
+        st.session_state.editable_resume = result["workflow"]["human_optimizer"]["human_friendly_resume"]
+        st.session_state.cover_letter = result["workflow"]["cover_letter"]["cover_letter"]
+        st.session_state.last_result = result
+        st.session_state.last_full_name = full_name
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
-            ["✅ Final Resume", "✉️ Cover Letter", "📝 First Draft", "📊 ATS Score", "🔍 Reviewer Notes"]
-        )
+# ------------------------------------------------------------------
+# Display results (persists across reruns via session_state, so Apply buttons work)
+# ------------------------------------------------------------------
+if "last_result" in st.session_state:
+    result = st.session_state.last_result
+    full_name = st.session_state.last_full_name
+    cover_letter = st.session_state.cover_letter
 
-        with tab1:
-            st.write(final_resume)
-            dl_col1, dl_col2 = st.columns(2)
-            with dl_col1:
-                st.download_button(
-                    "⬇️ Download Resume (TXT)",
-                    data=final_resume,
-                    file_name=f"{full_name.replace(' ', '_')}_resume.txt",
-                    mime="text/plain",
-                    use_container_width=True,
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["✅ Final Resume", "✉️ Cover Letter", "📝 First Draft", "📊 ATS Score", "🔍 Reviewer Notes"]
+    )
+
+    with tab1:
+        completeness = result["workflow"].get("completeness_check", {})
+        if completeness.get("possibly_missing"):
+            with st.container(border=True):
+                st.warning(
+                    f"⚠️ Content check: {completeness['completeness_pct']}% of detected resume entries "
+                    "appear to be present. The following original line(s) weren't found in the final "
+                    "version — please double-check nothing important was dropped:"
                 )
-            with dl_col2:
-                st.download_button(
-                    "⬇️ Download Resume (DOCX)",
-                    data=build_docx_bytes(final_resume),
-                    file_name=f"{full_name.replace(' ', '_')}_resume.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                )
+                for line in completeness["possibly_missing"]:
+                    st.caption(f"• {line}")
 
-        with tab2:
-            st.write(cover_letter)
-            dl_col1, dl_col2 = st.columns(2)
-            with dl_col1:
-                st.download_button(
-                    "⬇️ Download Cover Letter (TXT)",
-                    data=cover_letter,
-                    file_name=f"{full_name.replace(' ', '_')}_cover_letter.txt",
-                    mime="text/plain",
-                    use_container_width=True,
-                )
-            with dl_col2:
-                st.download_button(
-                    "⬇️ Download Cover Letter (DOCX)",
-                    data=build_docx_bytes(cover_letter),
-                    file_name=f"{full_name.replace(' ', '_')}_cover_letter.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                )
+        st.write(st.session_state.editable_resume)
+        dl_col1, dl_col2, dl_col3, dl_col4 = st.columns(4)
+        with dl_col1:
+            st.download_button(
+                "⬇️ TXT",
+                data=st.session_state.editable_resume,
+                file_name=f"{full_name.replace(' ', '_')}_resume.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+        with dl_col2:
+            st.download_button(
+                "⬇️ DOCX",
+                data=build_docx_bytes(st.session_state.editable_resume),
+                file_name=f"{full_name.replace(' ', '_')}_resume.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        with dl_col3:
+            st.download_button(
+                "⬇️ PDF",
+                data=build_pdf_bytes(st.session_state.editable_resume),
+                file_name=f"{full_name.replace(' ', '_')}_resume.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        with dl_col4:
+            if st.button("↩️ Reset edits", use_container_width=True):
+                st.session_state.editable_resume = result["workflow"]["human_optimizer"]["human_friendly_resume"]
+                st.rerun()
 
-        with tab3:
-            st.write(result["workflow"]["resume_writer"]["generated_resume"])
+    with tab2:
+        st.write(cover_letter)
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
+        with dl_col1:
+            st.download_button(
+                "⬇️ TXT",
+                data=cover_letter,
+                file_name=f"{full_name.replace(' ', '_')}_cover_letter.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+        with dl_col2:
+            st.download_button(
+                "⬇️ DOCX",
+                data=build_docx_bytes(cover_letter),
+                file_name=f"{full_name.replace(' ', '_')}_cover_letter.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        with dl_col3:
+            st.download_button(
+                "⬇️ PDF",
+                data=build_pdf_bytes(cover_letter),
+                file_name=f"{full_name.replace(' ', '_')}_cover_letter.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
 
-        with tab4:
-            ats_data = result["workflow"]["ats_optimization"]
-            score = ats_data.get("ats_score", 0)
-            st.metric("ATS Match Score", f"{score}/100")
-            st.progress(score / 100)
-            with st.expander("Detailed feedback"):
-                st.write(ats_data.get("llm_feedback", ""))
+    with tab3:
+        st.write(result["workflow"]["resume_writer"]["generated_resume"])
 
-        with tab5:
-            st.write(result["workflow"]["reviewer"]["review_feedback"])
+    with tab4:
+        ats_data = result["workflow"]["ats_optimization"]
+        score = ats_data.get("ats_score", 0)
+        st.metric("ATS Match Score", f"{score}/100")
+        st.progress(score / 100)
+        with st.expander("Detailed feedback"):
+            st.write(ats_data.get("llm_feedback", ""))
+
+    with tab5:
+        suggestions = result["workflow"]["reviewer"].get("suggestions", [])
+        if not suggestions:
+            st.write(result["workflow"]["reviewer"].get("review_feedback", "No issues found."))
+        else:
+            st.caption("Click Apply to instantly update the Final Resume tab with a fix.")
+            for i, sug in enumerate(suggestions):
+                issue = sug.get("issue", "Suggestion")
+                current_text = sug.get("current_text", "")
+                suggested_fix = sug.get("suggested_fix", "")
+
+                with st.container(border=True):
+                    st.markdown(f"**{issue}**")
+                    col_a, col_b, col_c = st.columns([2, 2, 1])
+                    with col_a:
+                        st.caption("Current")
+                        st.code(current_text, language=None)
+                    with col_b:
+                        st.caption("Suggested")
+                        st.code(suggested_fix, language=None)
+                    with col_c:
+                        st.write("")
+                        already_applied = current_text and current_text not in st.session_state.editable_resume
+                        if already_applied:
+                            st.success("Applied")
+                        elif st.button("Apply", key=f"apply_{i}", use_container_width=True):
+                            if current_text and current_text in st.session_state.editable_resume:
+                                st.session_state.editable_resume = st.session_state.editable_resume.replace(
+                                    current_text, suggested_fix, 1
+                                )
+                                st.rerun()
+                            else:
+                                st.warning("Couldn't find an exact match to auto-apply — edit manually.")
+
+# ------------------------------------------------------------------
+# Feedback footer
+# ------------------------------------------------------------------
+st.divider()
+st.markdown(
+    "### Found this useful? \n"
+    "[⭐ Leave a quick review here](PASTE_YOUR_GOOGLE_FORM_LINK_HERE) — it takes 30 seconds and helps a lot!"
+)
