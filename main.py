@@ -387,7 +387,19 @@ def resume_writer_agent(user_request, matched_chunks=None):
 
     log_event("Resume Writer Agent Started")
 
-    resume_content = "\n".join(matched_chunks) if matched_chunks else user_request.get("resume_text", "")
+def resume_writer_agent(user_request, matched_chunks=None):
+
+    log_event("Resume Writer Agent Started")
+
+    full_resume_text = user_request.get("resume_text", "")
+
+    emphasis_section = ""
+    if matched_chunks:
+        emphasis_section = f"""
+    The following excerpts from the candidate's resume are especially relevant to this job —
+    give them extra emphasis and prioritize them where natural, but this is guidance only:
+    {chr(10).join(matched_chunks)}
+    """
 
     prompt = f"""
     Generate a professional ATS-friendly resume.
@@ -404,8 +416,9 @@ def resume_writer_agent(user_request, matched_chunks=None):
     Experience:
     {user_request['experience_years']} years
 
-    Most relevant resume content for this job (retrieved via semantic search):
-    {resume_content}
+    Full source resume content (this is the complete and only source of truth — use ALL of it):
+    {full_resume_text}
+    {emphasis_section}
 
     Formatting rules (follow exactly):
     - Do NOT use tables (no pipe characters, no multi-column layouts) anywhere in the resume.
@@ -415,9 +428,10 @@ def resume_writer_agent(user_request, matched_chunks=None):
       Cloud & DevOps: AWS, Docker, Terraform
     - Use plain bullet points (-) for experience and skills, never a grid or table.
     - Use clear section headers in plain text (e.g. "PROFESSIONAL SUMMARY", "EXPERIENCE", "TECHNICAL SKILLS").
-    - CRITICAL: Include every distinct job, company, and project mentioned in the source content above.
-      Do not merge, summarize away, or silently drop any entry — even if there are many. If the source
-      mentions 3 projects or 4 jobs, the output must contain all 3 or all 4 as separate entries.
+    - CRITICAL: Include every distinct job, company, and project mentioned in the full source content above,
+      with their real company names and dates exactly as given. NEVER write placeholders like "[Not Provided]"
+      or "[Company Name]" — if a detail is in the source text, use it verbatim; do not omit, merge, or
+      genericize any entry, even if there are many.
     """
 
     resume = call_llm(prompt)
